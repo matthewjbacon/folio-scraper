@@ -1,60 +1,47 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright
 import asyncio
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import JSONResponse
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 async def scrape_zillow(url: str):
     async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto(url, timeout=60000)
-        # Wait for content to load
-        await page.wait_for_timeout(5000)
+        try:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto(url, timeout=15000)  # 15 sec timeout
+            await page.wait_for_load_state('networkidle', timeout=15000)
 
-        # Extract some example data
-        try:
-            price = await page.locator('span[data-test="home-details-summary-headline"]').text_content()
-        except Exception:
-            price = None
-        try:
-            beds = await page.locator('span[data-test="beds"]').text_content()
-        except Exception:
-            beds = None
-        try:
-            baths = await page.locator('span[data-test="baths"]').text_content()
-        except Exception:
-            baths = None
-        try:
-            sqft = await page.locator('span[data-test="sqft"]').text_content()
-        except Exception:
-            sqft = None
-        try:
-            address = await page.locator('h1[data-test="home-details-summary-headline"]').text_content()
-        except Exception:
-            address = None
+            # Example: Extract property title
+            title = await page.locator('h1[data-testid="home-details-summary-headline"]').text_content()
 
-        await browser.close()
+            # Example: Extract price
+            price = await page.locator('span[data-testid="price"]').text_content()
 
-        return {
-            "address": address,
-            "price": price,
-            "beds": beds,
-            "baths": baths,
-            "sqft": sqft,
-            "platform": "Zillow",
-            "source_url": url,
-        }
+            # Example: Extract address
+            address = await page.locator('h1[data-testid="home-details-summary-headline"]').text_content()
+
+            # Close browser
+            await browser.close()
+
+            return {
+                "title": title.strip() if title else None,
+                "price": price.strip() if price else None,
+                "address": address.strip() if address else None,
+                "url": url
+            }
+        except PlaywrightTimeoutError:
+            raise HTTPException(status_code=504, detail="Timeout while loading Zillow page")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error scraping Zillow: {str(e)}")
+
 
 @app.get("/scrape")
-async def scrape(url: str):
+async def scrape(url: str = Query(..., description="Zillow property URL to scrape")):
+    # Basic validation for URL domain
+    if "zillow.com" not in url:
+        raise HTTPException(status_code=400, detail="Only Zillow URLs are supported.")
     data = await scrape_zillow(url)
-    return data
+    return JSONResponse(content=data)
